@@ -1,0 +1,34 @@
+#!/bin/sh
+
+# Initialize configuration if not present
+uci -q get gateway_watchdog.settings || {
+    uci set gateway_watchdog.settings=settings
+    uci set gateway_watchdog.settings.enabled=1
+    uci set gateway_watchdog.settings.interface=wan
+    uci set gateway_watchdog.settings.delay=50
+    uci set gateway_watchdog.settings.max_failures=3
+    uci set gateway_watchdog.settings.cooldown=300
+    uci set gateway_watchdog.settings.recovery_mode=full
+    uci set gateway_watchdog.settings.diagnostic_targets="8.8.8.8,1.1.1.1"
+    uci set gateway_watchdog.settings.log_to_console=0
+    uci commit gateway_watchdog
+}
+
+# Ensure all custom files survive sysupgrade
+add_to_sysupgrade() {
+    grep -q "^$1$" /etc/sysupgrade.conf || echo "$1" >> /etc/sysupgrade.conf
+}
+
+add_to_sysupgrade "/etc/config/gateway_watchdog"
+add_to_sysupgrade "/etc/init.d/gateway_watchdog"
+add_to_sysupgrade "/usr/bin/gateway_watchdog.sh"
+add_to_sysupgrade "/usr/libexec/rpcd/gateway-watchdog-status"
+add_to_sysupgrade "/usr/share/rpcd/acl.d/luci-app-gateway-watchdog.json"
+add_to_sysupgrade "/usr/share/luci/menu.d/luci-app-gateway-watchdog.json"
+add_to_sysupgrade "/www/luci-static/resources/view/gateway-watchdog/"
+
+# Enable and start the service
+/etc/init.d/gateway_watchdog enable
+/etc/init.d/gateway_watchdog start
+
+exit 0

@@ -1,0 +1,189 @@
+name: Publish Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      
+      - name: Get tag name and version
+        id: get_tag
+        run: |
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          echo "TAG_NAME=$TAG_NAME" >> $GITHUB_OUTPUT
+          VERSION=${TAG_NAME#v}
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+      
+      - name: Check if pre-release
+        id: prerelease
+        run: |
+          if [[ "${{ steps.get_tag.outputs.TAG_NAME }}" == *"-beta"* || "${{ steps.get_tag.outputs.TAG_NAME }}" == *"-rc"* || "${{ steps.get_tag.outputs.TAG_NAME }}" == *"-alpha"* ]]; then
+            echo "IS_PRERELEASE=true" >> $GITHUB_OUTPUT
+            echo "This is a pre-release version"
+          else
+            echo "IS_PRERELEASE=false" >> $GITHUB_OUTPUT
+            echo "This is a stable release"
+          fi
+      
+      - name: Set release title based on tag type
+        id: release_title
+        run: |
+          TAG="${{ steps.get_tag.outputs.TAG_NAME }}"
+          
+          if [[ "$TAG" == *"-beta"* ]]; then
+            echo "RELEASE_TITLE=Beta - $TAG" >> $GITHUB_OUTPUT
+          elif [[ "$TAG" == *"-rc"* ]]; then
+            echo "RELEASE_TITLE=Pre-release - $TAG" >> $GITHUB_OUTPUT
+          elif [[ "$TAG" == *"-alpha"* ]]; then
+            echo "RELEASE_TITLE=Alpha-release - $TAG" >> $GITHUB_OUTPUT
+          else
+            echo "RELEASE_TITLE=Release - $TAG" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Get tag message (strip PGP signature)
+        id: tag_message
+        run: |
+          # Get tag message and remove PGP signature block
+          TAG_MSG=$(git tag -l --format='%(contents)' "${{ steps.get_tag.outputs.TAG_NAME }}" | sed '/-----BEGIN PGP SIGNATURE-----/,/-----END PGP SIGNATURE-----/d')
+          
+          # Remove any trailing empty lines
+          TAG_MSG=$(echo "$TAG_MSG" | sed '/^$/N;/\n$/D')
+          
+          echo "TAG_MESSAGE<<EOF" >> $GITHUB_OUTPUT
+          echo "$TAG_MSG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+      
+      - name: Verify script exists
+        run: |
+          if [ ! -f "create-gateway-watchdog-tarball.sh" ]; then
+            echo "Error: create-gateway-watchdog-tarball.sh not found"
+            exit 1
+          fi
+          echo "Script found, proceeding..."
+      
+      - name: Make script executable
+        run: chmod +x create-gateway-watchdog-tarball.sh
+      
+      - name: Run tarball creation script
+        run: ./create-gateway-watchdog-tarball.sh
+      
+      - name: Verify and rename artifact
+        run: |
+          if [ ! -f "luci-app-gateway-watchdog.tar.gz" ]; then
+            echo "Error: luci-app-gateway-watchdog.tar.gz was not created"
+            exit 1
+          fi
+          
+          NEW_NAME="gateway-watchdog-${{ steps.get_tag.outputs.TAG_NAME }}.tar.gz"
+          mv luci-app-gateway-watchdog.tar.gz "$NEW_NAME"
+          echo "ARTIFACT_NAME=$NEW_NAME" >> $GITHUB_ENV
+          echo "Created artifact: $NEW_NAME"
+      
+      - name: Generate comprehensive checksums
+        run: |
+          ARTIFACT="${{ env.ARTIFACT_NAME }}"
+          
+          echo "Generating checksums for $ARTIFACT"
+          
+          sha256sum "$ARTIFACT" | awk '{print $1}' > "$ARTIFACT.sha256"
+          sha1sum "$ARTIFACT" | awk '{print $1}' > "$ARTIFACT.sha1"
+          md5sum "$ARTIFACT" | awk '{print $1}' > "$ARTIFACT.md5"
+          
+          cat > "$ARTIFACT.checksums" << EOF
+          # Checksums for $ARTIFACT
+          # Generated: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          # Release: ${{ steps.get_tag.outputs.TAG_NAME }}
+          # Repository: ${{ github.repository }}
+          
+          ## Checksums
+          SHA256: $(sha256sum "$ARTIFACT" | awk '{print $1}')
+          SHA1: $(sha1sum "$ARTIFACT" | awk '{print $1}')
+          MD5: $(md5sum "$ARTIFACT" | awk '{print $1}')
+          EOF
+          
+          cat > checksums.json << EOF
+          {
+            "artifact": "$ARTIFACT",
+            "release": "${{ steps.get_tag.outputs.TAG_NAME }}",
+            "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+            "checksums": {
+              "sha256": "$(sha256sum "$ARTIFACT" | awk '{print $1}')",
+              "sha1": "$(sha1sum "$ARTIFACT" | awk '{print $1}')",
+              "md5": "$(md5sum "$ARTIFACT" | awk '{print $1}')"
+            }
+          }
+          EOF
+          
+          echo "Generated checksum files:"
+          ls -la "$ARTIFACT".* checksums.json 2>/dev/null || true
+      
+      - name: Verify checksums (self-test)
+        run: |
+          ARTIFACT="${{ env.ARTIFACT_NAME }}"
+          
+          echo "Verifying checksums..."
+          
+          echo "$(cat "$ARTIFACT.sha256")  $ARTIFACT" > /tmp/verify.sha256
+          if sha256sum -c /tmp/verify.sha256 2>/dev/null; then
+            echo "✓ SHA256 checksum verified"
+          else
+            echo "✗ SHA256 checksum verification failed"
+            exit 1
+          fi
+          
+          echo "$(cat "$ARTIFACT.sha1")  $ARTIFACT" > /tmp/verify.sha1
+          if sha1sum -c /tmp/verify.sha1 2>/dev/null; then
+            echo "✓ SHA1 checksum verified"
+          else
+            echo "✗ SHA1 checksum verification failed"
+            exit 1
+          fi
+          
+          echo "$(cat "$ARTIFACT.md5")  $ARTIFACT" > /tmp/verify.md5
+          if md5sum -c /tmp/verify.md5 2>/dev/null; then
+            echo "✓ MD5 checksum verified"
+          else
+            echo "✗ MD5 checksum verification failed"
+            exit 1
+          fi
+          
+          echo "All checksums verified successfully"
+      
+      - name: Cleanup temporary files
+        if: always()
+        run: rm -f /tmp/verify.*
+      
+      - name: Create Release and Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.get_tag.outputs.TAG_NAME }}
+          name: ${{ steps.release_title.outputs.RELEASE_TITLE }}
+          body: ${{ steps.tag_message.outputs.TAG_MESSAGE }}
+          draft: false
+          prerelease: ${{ steps.prerelease.outputs.IS_PRERELEASE == 'true' }}
+          make_latest: true
+          files: |
+            ${{ env.ARTIFACT_NAME }}
+            ${{ env.ARTIFACT_NAME }}.sha256
+            ${{ env.ARTIFACT_NAME }}.sha1
+            ${{ env.ARTIFACT_NAME }}.md5
+            ${{ env.ARTIFACT_NAME }}.checksums
+            checksums.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

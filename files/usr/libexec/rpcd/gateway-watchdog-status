@@ -1,0 +1,52 @@
+#!/bin/sh
+. /usr/share/libubox/jshn.sh
+
+STATS_FILE="/tmp/gateway_watchdog_stats"
+HISTORY_FILE="/tmp/gateway_watchdog.history"
+
+case "$1" in
+  list)
+    json_init
+    json_add_object "get_status"
+    json_close_object
+    json_dump
+    ;;
+  call)
+    case "$2" in
+      get_status)
+        json_init
+        
+        if [ -f "$STATS_FILE" ]; then
+            stats_content=$(cat "$STATS_FILE")
+            if [ -n "$stats_content" ]; then
+                old_ifs="$IFS"
+                IFS=';'
+                for kv in $stats_content; do
+                    [ -z "$kv" ] && continue
+                    key="${kv%%=*}"
+                    value="${kv#*=}"
+                    json_add_string "$key" "$value"
+                done
+                IFS="$old_ifs"
+            fi
+        fi
+      
+        if [ -f "$HISTORY_FILE" ]; then
+            json_add_array "history"
+            lines=$(tail -n 10 "$HISTORY_FILE")
+            if [ -n "$lines" ]; then
+                old_ifs="$IFS"
+                IFS='
+'
+                for line in $lines; do
+                    [ -n "$line" ] && json_add_string "" "$line"
+                done
+                IFS="$old_ifs"
+            fi
+            json_close_array
+        fi
+        json_dump
+        ;;
+    esac
+    ;;
+esac

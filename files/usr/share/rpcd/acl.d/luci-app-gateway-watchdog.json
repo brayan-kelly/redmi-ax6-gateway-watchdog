@@ -1,0 +1,22 @@
+{
+	"luci-app-gateway-watchdog": {
+		"description": "Grant UCI and ubus access for gateway watchdog",
+		"read": {
+			"ubus": {
+				"gateway-watchdog-status": [ "get_status" ]
+			},
+			"uci": [
+				"gateway_watchdog"
+			],
+			"file": {
+				"/tmp/gateway_watchdog_stats": [ "read" ],
+				"/tmp/gateway_watchdog.history": [ "read" ]
+			}
+		},
+		"write": {
+			"uci": [
+				"gateway_watchdog"
+			]
+		}
+	}
+}
