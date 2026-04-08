@@ -62,7 +62,7 @@ return view.extend({
         o = s.option(form.Value, 'max_failures', _('Max Failures'));
         o.datatype = 'uinteger';
         o.rmempty = false;
-        o.default = '3';
+        o.default = '5';
 
         o = s.option(form.Value, 'cooldown', _('Cooldown (seconds)'));
         o.datatype = 'uinteger';

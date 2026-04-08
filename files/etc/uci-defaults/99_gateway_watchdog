@@ -5,8 +5,8 @@ uci -q get gateway_watchdog.settings || {
     uci set gateway_watchdog.settings=settings
     uci set gateway_watchdog.settings.enabled=1
     uci set gateway_watchdog.settings.interface=wan
-    uci set gateway_watchdog.settings.delay=50
-    uci set gateway_watchdog.settings.max_failures=3
+    uci set gateway_watchdog.settings.delay=10
+    uci set gateway_watchdog.settings.max_failures=5
     uci set gateway_watchdog.settings.cooldown=300
     uci set gateway_watchdog.settings.recovery_mode=full
     uci set gateway_watchdog.settings.recovery_verify_targets="8.8.8.8,1.1.1.1"

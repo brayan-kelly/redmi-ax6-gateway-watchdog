@@ -18,11 +18,11 @@ load_config() {
 
     WAN_IFACE=$(uci -q get gateway_watchdog.settings.interface || echo "wan")
     DELAY=$(uci -q get gateway_watchdog.settings.delay || echo 10)
-    MAX_FAILURES=$(uci -q get gateway_watchdog.settings.max_failures || echo 3)
+    MAX_FAILURES=$(uci -q get gateway_watchdog.settings.max_failures || echo 5)
 
-    # Validate MAX_FAILURES (non-numeric → default to 3)
+    # Validate MAX_FAILURES (non-numeric → default to 5)
     case "$MAX_FAILURES" in
-        ''|*[!0-9]*) MAX_FAILURES=3 ;;
+        ''|*[!0-9]*) MAX_FAILURES=5 ;;
     esac
     # Enforce minimum 1
     [ "$MAX_FAILURES" -lt 1 ] && MAX_FAILURES=1
