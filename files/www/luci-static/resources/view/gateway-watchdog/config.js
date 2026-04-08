@@ -80,7 +80,7 @@ return view.extend({
         o.value('full', 'Full (ifdown + route flush + ifup)');
         o.value('reboot', 'Reboot');
 
-        o = s.option(form.Value, 'diagnostic_targets', _('Diagnostic Targets'));
+        o = s.option(form.Value, 'recovery_verify_targets', _('Diagnostic Targets'));
         o.rmempty = false;
         o.default = '8.8.8.8,1.1.1.1';
         o.description = _('Comma-separated list of IPs to ping for connectivity verification.');

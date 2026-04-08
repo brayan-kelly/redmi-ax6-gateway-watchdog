@@ -29,7 +29,7 @@ load_config() {
 
     COOLDOWN=$(uci -q get gateway_watchdog.settings.cooldown || echo 300)
     RECOVERY_MODE=$(uci -q get gateway_watchdog.settings.recovery_mode || echo "full")
-    TARGETS=$(uci -q get gateway_watchdog.settings.diagnostic_targets || echo "8.8.8.8,1.1.1.1")
+    TARGETS=$(uci -q get gateway_watchdog.settings.recovery_verify_targets || echo "8.8.8.8,1.1.1.1")
     LOG_TO_CONSOLE=$(uci -q get gateway_watchdog.settings.log_to_console || echo "0")
 
     TARGETS=$(echo "$TARGETS" | tr ',' ' ')
