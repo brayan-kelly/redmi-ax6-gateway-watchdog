@@ -1,4 +1,7 @@
 luci-app-gateway-watchdog/
+luci-app-gateway-watchdog.tar.gz
 *.tar.gz
 .DS_Store
 Thumbs.db
+._*
+ 
