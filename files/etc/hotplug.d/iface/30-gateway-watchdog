@@ -1,0 +1,40 @@
+#!/bin/sh
+# =========================================================
+# Gateway Watchdog — Interface Hotplug Handler
+# Location: /etc/hotplug.d/iface/30-gateway-watchdog
+
+# Only act when a logical interface finishes coming up
+[ "$ACTION" = "ifup" ] || exit 0
+
+LOG_TAG="gateway_watchdog"
+
+# -------------------------------------------------------
+# Match against the configured WAN UCI interface name.
+# INTERFACE is provided by the iface hotplug subsystem
+# and is already the UCI name (e.g. "wan"), not a kernel
+# device name — no device resolution required.
+# -------------------------------------------------------
+WAN_UCI=$(uci -q get gateway_watchdog.settings.interface || echo "wan")
+
+[ "$INTERFACE" = "$WAN_UCI" ] || exit 0
+
+# -------------------------------------------------------
+# Check the watchdog is enabled in UCI before doing anything
+# -------------------------------------------------------
+ENABLED=$(uci -q get gateway_watchdog.settings.enabled || echo "1")
+[ "$ENABLED" = "0" ] && {
+    logger -t "$LOG_TAG" "HOTPLUG | ifup on $INTERFACE but service is disabled — skipping"
+    exit 0
+}
+
+# -------------------------------------------------------
+# Don't start a second instance if one is already running
+# -------------------------------------------------------
+if /etc/init.d/gateway_watchdog running 2>/dev/null; then
+    logger -t "$LOG_TAG" "HOTPLUG | ifup on $INTERFACE but service already running — skipping"
+    exit 0
+fi
+
+logger -t "$LOG_TAG" "HOTPLUG | ifup on $INTERFACE — starting gateway_watchdog"
+
+/etc/init.d/gateway_watchdog start
