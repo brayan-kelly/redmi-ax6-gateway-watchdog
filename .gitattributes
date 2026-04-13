@@ -1,0 +1,69 @@
+# =============================================================
+# .gitattributes — Gateway Watchdog LuCI App
+# =============================================================
+# Ensures all shell scripts and text files are stored in the
+# repository with LF line endings regardless of the developer's
+# OS, preventing CRLF from breaking OpenWrt init scripts and
+# the LuCI Startup page shebang recognition.
+# =============================================================
+
+# -------------------------------------------------------
+# Default: all text files use LF
+# -------------------------------------------------------
+* text=auto eol=lf
+
+# -------------------------------------------------------
+# Shell scripts — always LF, never CRLF
+# Critical: #!/bin/sh /etc/rc.common and #!/bin/sh shebangs
+# break silently on OpenWrt if CRLF is present.
+# -------------------------------------------------------
+*.sh        text eol=lf
+*.ash       text eol=lf
+
+# -------------------------------------------------------
+# OpenWrt-specific files (no extension)
+# -------------------------------------------------------
+files/etc/init.d/*              text eol=lf
+files/etc/hotplug.d/**/*        text eol=lf
+files/etc/uci-defaults/*        text eol=lf
+files/usr/bin/*                 text eol=lf
+files/usr/libexec/rpcd/*        text eol=lf
+
+# -------------------------------------------------------
+# LuCI / web assets
+# -------------------------------------------------------
+*.js        text eol=lf
+*.css       text eol=lf
+*.html      text eol=lf
+*.htm       text eol=lf
+*.json      text eol=lf
+
+# -------------------------------------------------------
+# Config and data files
+# -------------------------------------------------------
+*.conf      text eol=lf
+*.cfg       text eol=lf
+*.uci       text eol=lf
+Makefile    text eol=lf
+makefile    text eol=lf
+
+# -------------------------------------------------------
+# Documentation
+# -------------------------------------------------------
+*.md        text eol=lf
+*.txt       text eol=lf
+LICENSE     text eol=lf
+README      text eol=lf
+
+# -------------------------------------------------------
+# Binary files — no line ending conversion
+# -------------------------------------------------------
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.gz        binary
+*.tar       binary
+*.zip       binary
+*.ipk       binary
