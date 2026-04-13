@@ -2,47 +2,97 @@
 
 STATS_FILE="/tmp/gateway_watchdog_stats"
 LOCK_FILE="/tmp/gateway_watchdog.lock"
+HISTORY_FILE="/tmp/gateway_watchdog.history"
+HISTORY_LOCK="/tmp/gateway_watchdog.history.lock"
 
 LOG_TAG="gateway_watchdog"
 
+# ================= CONFIG =================
 load_config() {
     WAN_IFACE=$(uci -q get gateway_watchdog.settings.interface || echo "wan")
+
     DELAY=$(uci -q get gateway_watchdog.settings.delay || echo 10)
-    MAX_FAILURES=$(uci -q get gateway_watchdog.settings.max_failures || echo 5)
+    MAX_FAILURES=$(uci -q get gateway_watchdog.settings.max_failures || echo 3)
     COOLDOWN=$(uci -q get gateway_watchdog.settings.cooldown || echo 300)
-    RECOVERY_MODE=$(uci -q get gateway_watchdog.settings.recovery_mode || echo "full")
-    TARGETS=$(uci -q get gateway_watchdog.settings.recovery_verify_targets || echo "8.8.8.8,1.1.1.1")
 
-    case "$DELAY" in ''|*[!0-9]*) DELAY=10 ;; esac
-    case "$MAX_FAILURES" in ''|*[!0-9]*) MAX_FAILURES=5 ;; esac
-    case "$COOLDOWN" in ''|*[!0-9]*) COOLDOWN=300 ;; esac
-
+    # Apply numeric validation and minimum clamp to DELAY and COOLDOWN,
+    # matching the same guard already applied to MAX_FAILURES. A non-numeric
+    # UCI value would otherwise cause sleep/comparison failures and a CPU spin.
+    case "$DELAY" in
+        ''|*[!0-9]*) DELAY=10 ;;
+    esac
     [ "$DELAY" -lt 1 ] && DELAY=1
+
+    case "$MAX_FAILURES" in
+        ''|*[!0-9]*) MAX_FAILURES=3 ;;
+    esac
     [ "$MAX_FAILURES" -lt 1 ] && MAX_FAILURES=1
+
+    case "$COOLDOWN" in
+        ''|*[!0-9]*) COOLDOWN=300 ;;
+    esac
     [ "$COOLDOWN" -lt 1 ] && COOLDOWN=1
 
-    TARGETS=$(echo "$TARGETS" | tr ',' ' ')
+    RECOVERY_MODE=$(uci -q get gateway_watchdog.settings.recovery_mode || echo "full")
+
+    RECOVERY_VERIFY_TARGETS=$(uci -q get gateway_watchdog.settings.recovery_verify_targets || echo "8.8.8.8,1.1.1.1")
+    RECOVERY_VERIFY_TARGETS=$(echo "$RECOVERY_VERIFY_TARGETS" | tr ',' ' ')
+
+    LOG_TO_CONSOLE=$(uci -q get gateway_watchdog.settings.log_to_console || echo "0")
 }
 
+# ================= STATE =================
 CHECK_COUNT=0
+FAILURE_COUNT=0
+RECOVERY_COUNT=0
 CONSECUTIVE_FAILURES=0
+LAST_STATUS=""
+LAST_EVENT=""
 LAST_RECOVERY_TIME=0
 CURRENT_STATUS="initializing"
-FAIL_REASON=""
-
-START_TIME=$(date +%s)
-GRACE_PERIOD=60
 
 log() {
     logger -t "$LOG_TAG" "$1"
+    if [ "$LOG_TO_CONSOLE" = "1" ] && [ -t 1 ]; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') [$LOG_TAG] $1"
+    fi
 }
 
-is_iface_up() {
-    ip link show "$WAN_IFACE" 2>/dev/null | grep -q "state UP"
-}
+is_cable_plugged() {
+    local iface="${1:-wan}" dev phy carrier state
 
-is_iface_ready() {
-    ubus call network.interface."$WAN_IFACE" status 2>/dev/null | grep -q '"up": true'
+    dev=$(uci -q get network."$iface".device 2>/dev/null)
+    [ -z "$dev" ] && dev=$(uci -q get network."$iface".ifname 2>/dev/null)
+    [ -z "$dev" ] && dev="$iface"
+
+    if [ -d "/sys/class/net/$dev/brif" ]; then
+        phy=$(ls /sys/class/net/"$dev"/brif 2>/dev/null | head -n1)
+        [ -n "$phy" ] && dev="$phy"
+    fi
+
+    if [ -f "/sys/class/net/$dev/carrier" ]; then
+        carrier=$(cat "/sys/class/net/$dev/carrier" 2>/dev/null)
+        [ "$carrier" = "1" ] && return 0
+        [ "$carrier" = "0" ] && return 1
+    fi
+
+    if [ -f "/sys/class/net/$dev/operstate" ]; then
+        state=$(cat "/sys/class/net/$dev/operstate" 2>/dev/null)
+        case "$state" in
+            up|unknown) return 0 ;;
+            down|dormant|lowerlayerdown) return 1 ;;
+        esac
+    fi
+
+    # Log a warning when falling back to directory-existence check so
+    # operators can identify interfaces where carrier/operstate are unavailable
+    # (e.g. virtual interfaces, some USB adapters) and detection is unreliable.
+    if [ -d "/sys/class/net/$dev" ]; then
+        log "WARN | cable detection fallback for $dev — no carrier/operstate in sysfs, assuming up"
+        return 0
+    fi
+
+    return 1
 }
 
 get_gateway_ip() {
@@ -53,138 +103,179 @@ check_connectivity() {
     ping -c 1 -W 2 "$1" >/dev/null 2>&1
 }
 
-#Boot intelligence
-boot_wait() {
-    local now uptime
-    now=$(date +%s)
-    uptime=$((now - START_TIME))
+internet_ok() {
+    for t in $RECOVERY_VERIFY_TARGETS; do
+        check_connectivity "$t" && return 0
+    done
+    return 1
+}
 
-    #Phase 1: Grace period
-    if [ "$uptime" -lt "$GRACE_PERIOD" ]; then
-        CURRENT_STATUS="initializing"
-        log "BOOT WAIT | grace period | uptime=${uptime}s/${GRACE_PERIOD}s"
-        return 1
+write_stats() {
+    local ts; ts=$(date +%s)
+    {
+        flock -x 200
+        printf "total_checks=%s;total_failures=%s;total_recoveries=%s;current_status=%s;last_loop_time=%s;consecutive_failures=%s\n" \
+            "$CHECK_COUNT" "$FAILURE_COUNT" "$RECOVERY_COUNT" \
+            "$CURRENT_STATUS" "$ts" "$CONSECUTIVE_FAILURES" \
+            > "${STATS_FILE}.tmp"
+        mv "${STATS_FILE}.tmp" "$STATS_FILE"
+    } 200>"$LOCK_FILE"
+}
+
+# Raised periodic OK logging from every 10 to every 100 checks.
+# At 10s/check this is ~16 min, preventing the 50-line history cap from
+# being consumed by noise during stable operation.
+append_history() {
+    local ts dt should_log=0 event="OK"
+
+    ts=$(date +%s)
+    dt=$(date '+%Y-%m-%d %H:%M:%S')
+
+    case "$CURRENT_STATUS" in
+        healthy) [ "$CONSECUTIVE_FAILURES" -gt 0 ] && event="RECOVERY" || event="OK" ;;
+        unhealthy|interface_down|cable_disconnected) event="FAILURE" ;;
+        recovering) event="RECOVERY" ;;
+        *) event="OK" ;;
+    esac
+
+    if [ "$CURRENT_STATUS" != "$LAST_STATUS" ] || [ "$event" != "$LAST_EVENT" ]; then
+        should_log=1
     fi
 
-    #Phase 2: Interface link
-    if ! is_iface_up; then
-        CURRENT_STATUS="initializing"
-        log "BOOT WAIT | interface down"
-        return 1
+    if [ $((CHECK_COUNT % 100)) -eq 0 ]; then
+        should_log=1
     fi
 
-    #Phase 3: Interface ready (DHCP)
-    if ! is_iface_ready; then
-        CURRENT_STATUS="initializing"
-        log "BOOT WAIT | interface not ready (DHCP)"
-        return 1
-    fi
+    [ "$should_log" -eq 0 ] && return
 
-    #Phase 4: Default route
-    if [ -z "$(get_gateway_ip)" ]; then
-        CURRENT_STATUS="initializing"
-        log "BOOT WAIT | no default route yet"
-        return 1
-    fi
+    LAST_STATUS="$CURRENT_STATUS"
+    LAST_EVENT="$event"
 
-    return 0
+    {
+        flock -x 200
+        printf "%s|%s|%s|%s|%s|%s|%s\n" \
+            "$ts" "$dt" "$CHECK_COUNT" "$FAILURE_COUNT" \
+            "$RECOVERY_COUNT" "$CURRENT_STATUS" "$event" \
+            >> "$HISTORY_FILE"
+
+        tail -n 50 "$HISTORY_FILE" > "${HISTORY_FILE}.tmp" && mv "${HISTORY_FILE}.tmp" "$HISTORY_FILE"
+    } 200>"$HISTORY_LOCK"
 }
 
 execute_recovery() {
-    local mode="$RECOVERY_MODE"
-    local now elapsed
+    local mode="$1"
+    local now; now=$(date +%s)
 
-    now=$(date +%s)
-    elapsed=$((now - LAST_RECOVERY_TIME))
-
-    # Cooldown with bypass
-    if [ "$elapsed" -lt "$COOLDOWN" ]; then
-        if [ "$CONSECUTIVE_FAILURES" -lt $((MAX_FAILURES * 2)) ]; then
-            log "RECOVERY SKIPPED | cooldown"
-            return 2
-        else
-            log "RECOVERY FORCED | bypass cooldown"
-        fi
-    fi
-
-    #Failure override
-    [ "$FAIL_REASON" = "no_route" ] && mode="full"
-
-    #Escalation
-    if [ "$CONSECUTIVE_FAILURES" -ge $((MAX_FAILURES * 3)) ]; then
-        mode="reboot"
-    elif [ "$CONSECUTIVE_FAILURES" -ge $((MAX_FAILURES * 2)) ]; then
-        mode="full"
+    if [ $((now - LAST_RECOVERY_TIME)) -lt "$COOLDOWN" ]; then
+        log "Recovery skipped (cooldown active)"
+        return 2
     fi
 
     LAST_RECOVERY_TIME=$now
+    RECOVERY_COUNT=$((RECOVERY_COUNT+1))
     CURRENT_STATUS="recovering"
 
-    log "RECOVERY START | mode=$mode | failures=$CONSECUTIVE_FAILURES"
+    log "Recovery triggered (mode: $mode)"
 
     case "$mode" in
-        ping-retry) sleep 2 ;;
-        standard) ifdown "$WAN_IFACE"; sleep 2; ifup "$WAN_IFACE"; sleep 5 ;;
-        route-flush) ip route flush dev "$WAN_IFACE"; sleep 2 ;;
-        dhcp-renew) ubus call network.interface."$WAN_IFACE" renew; sleep 5 ;;
+        none)
+            return 0
+            ;;
+
+        standard)
+            ifdown "$WAN_IFACE"; sleep 2; ifup "$WAN_IFACE"; sleep 5
+            ;;
+
+        dhcp-renew)
+            ubus call network.interface."$WAN_IFACE" renew; sleep 5
+            ;;
+
+        lan-reset)
+            ifdown lan; sleep 2
+            ip route flush dev lan
+            ifup lan; sleep 6
+            ;;
+
         full)
             ifdown "$WAN_IFACE"; sleep 2
             ip route flush dev "$WAN_IFACE"
             ifup "$WAN_IFACE"; sleep 6
+            ifdown lan; sleep 2
+            ifup lan; sleep 6
             ;;
-        reboot) sync; reboot; sleep 10 ;;
+
+        # sleep 30 added after reboot so execution stalls until the
+        # system halts rather than falling through to the internet_ok check,
+        # which would always fail and return 1, setting CURRENT_STATUS to
+        # "recovering" based on a spurious post-reboot verification failure.
+        reboot)
+            log "Rebooting system"
+            sync; reboot; sleep 30
+            return 0
+            ;;
     esac
 
-    for t in $TARGETS; do
-        if check_connectivity "$t"; then
-            log "RECOVERY SUCCESS | target=$t"
-            CONSECUTIVE_FAILURES=0
-            CURRENT_STATUS="healthy"
-            return 0
-        fi
-    done
-
-    log "RECOVERY FAILED"
+    internet_ok && return 0
     return 1
 }
 
 daemon_loop() {
     load_config
 
-    log "START | iface=$WAN_IFACE delay=${DELAY}s max_failures=$MAX_FAILURES cooldown=${COOLDOWN}s"
-
     while true; do
-        CHECK_COUNT=$((CHECK_COUNT + 1))
+        CHECK_COUNT=$((CHECK_COUNT+1))
 
-        #Boot intelligence gate
-        if ! boot_wait; then
-            sleep "$DELAY"
-            continue
+        if ! is_cable_plugged "$WAN_IFACE"; then
+            CURRENT_STATUS="cable_disconnected"
+            log "Cable unplugged on $WAN_IFACE — stopping service. Hotplug will restart on reconnect."
+
+            write_stats
+            append_history
+
+            # Stop the service cleanly via procd. The hotplug script at
+            # /etc/hotplug.d/net/30-gateway-watchdog will restart it when
+            # the physical link comes back up.
+            /etc/init.d/gateway_watchdog stop
+            exit 0
         fi
 
         GW=$(get_gateway_ip)
 
         if [ -z "$GW" ]; then
-            FAIL_REASON="no_route"
-            CONSECUTIVE_FAILURES=$((CONSECUTIVE_FAILURES + 1))
+            FAILURE_COUNT=$((FAILURE_COUNT+1))
+            CONSECUTIVE_FAILURES=$((CONSECUTIVE_FAILURES+1))
             CURRENT_STATUS="unhealthy"
-            log "No default route | failures=$CONSECUTIVE_FAILURES/$MAX_FAILURES"
+            log "No default route (failure $CONSECUTIVE_FAILURES/$MAX_FAILURES)"
         else
-            if check_connectivity "$GW"; then
-                CONSECUTIVE_FAILURES=0
+            # Combined gateway ping + internet_ok so the healthy path
+            # uses the same targets as recovery verification. Previously a
+            # working LAN with no internet would be incorrectly marked healthy.
+            if check_connectivity "$GW" && internet_ok; then
                 CURRENT_STATUS="healthy"
+                CONSECUTIVE_FAILURES=0
             else
-                FAIL_REASON="gw_unreachable"
-                CONSECUTIVE_FAILURES=$((CONSECUTIVE_FAILURES + 1))
+                FAILURE_COUNT=$((FAILURE_COUNT+1))
+                CONSECUTIVE_FAILURES=$((CONSECUTIVE_FAILURES+1))
                 CURRENT_STATUS="unhealthy"
-                log "Gateway unreachable | failures=$CONSECUTIVE_FAILURES/$MAX_FAILURES"
+                log "Failure ($CONSECUTIVE_FAILURES/$MAX_FAILURES)"
             fi
         fi
 
         if [ "$CURRENT_STATUS" = "unhealthy" ] && [ "$CONSECUTIVE_FAILURES" -ge "$MAX_FAILURES" ]; then
-            execute_recovery
+            execute_recovery "$RECOVERY_MODE"
+            rc=$?
+            if [ $rc -eq 0 ]; then
+                CURRENT_STATUS="healthy"
+                CONSECUTIVE_FAILURES=0
+            elif [ $rc -eq 2 ]; then
+                CURRENT_STATUS="unhealthy"
+            else
+                CURRENT_STATUS="recovering"
+            fi
         fi
 
+        write_stats
+        append_history
         sleep "$DELAY"
     done
 }

@@ -1,45 +1,91 @@
 #!/bin/sh /etc/rc.common
+# Gateway Watchdog - procd Service 
 
 START=95
 STOP=10
 USE_PROCD=1
-
-PROG=/usr/bin/gateway_watchdog.sh
-PIDFILE=/var/run/gateway_watchdog.pid
+PROG="/usr/bin/gateway_watchdog.sh"
+PIDFILE="/var/run/gateway_watchdog.pid"
 LOG_TAG="gateway_watchdog"
 
+validate_service() {
+    [ -x "$PROG" ] || {
+        logger -t "$LOG_TAG" "ERROR | binary not executable: $PROG"
+        return 1
+    }
+    return 0
+}
+
+# config_load is no longer called inside is_enabled.
+# The caller (start_service) loads the config once and passes
+# the enabled value in, avoiding repeated/stateful config_load calls.
+is_enabled() {
+    local enabled="$1"
+    [ "$enabled" -eq 1 ]
+}
+
 start_service() {
+    validate_service || return 1
+
+    # Load config once at the top level, then pass values down.
     local enabled
     config_load gateway_watchdog
     config_get_bool enabled settings enabled 1
-    [ "$enabled" -eq 0 ] && return 0
 
-    [ -x "$PROG" ] || {
-        logger -t "$LOG_TAG" "Error: $PROG not found or not executable"
-        return 1
-    }
+    if ! is_enabled "$enabled"; then
+        logger -t "$LOG_TAG" "Service disabled in UCI"
+        return 0
+    fi
 
-    logger -t "$LOG_TAG" "Starting service"
+    # Config values are read here only for the startup log message.
+    # The daemon reads them independently via load_config. To avoid defaults
+    # diverging between this log and actual runtime, keep these defaults in
+    # sync with load_config in gateway_watchdog.sh.
+    local wan_iface delay max_failures recovery_mode cooldown log_to_console
+    wan_iface=$(uci -q get gateway_watchdog.settings.interface || echo "wan")
+    delay=$(uci -q get gateway_watchdog.settings.delay || echo 10)
+    max_failures=$(uci -q get gateway_watchdog.settings.max_failures || echo 3)
+    recovery_mode=$(uci -q get gateway_watchdog.settings.recovery_mode || echo "full")
+    cooldown=$(uci -q get gateway_watchdog.settings.cooldown || echo 300)
+    log_to_console=$(uci -q get gateway_watchdog.settings.log_to_console || echo "0")
+
+    logger -t "$LOG_TAG" "Starting service | interface=$wan_iface recovery_mode=$recovery_mode" \
+        "delay=$delay max_failures=$max_failures cooldown=$cooldown log_to_console=$log_to_console"
 
     procd_open_instance
     procd_set_param command "$PROG"
-    procd_set_param respawn 3600 5 5
+
+    # Respawn policy:
+    # Threshold raised from 5 to 10 crashes within 3600s to prevent
+    # procd permanently giving up during prolonged boot-time WAN instability.
+    procd_set_param respawn 3600 5 10
+
     procd_set_param stdout 1
     procd_set_param stderr 1
+
     procd_set_param pidfile "$PIDFILE"
+
+    # Nice level (optional, reduce CPU priority)
+    procd_set_param nice 10
+
     procd_close_instance
 }
 
+# Clean up stale lock files on stop to prevent the daemon from
+# deadlocking on a restart if it was killed mid-write.
+# Stats and history files are intentionally preserved for LuCI.
 stop_service() {
-    logger -t "$LOG_TAG" "Reloading service"
-    rm -f /tmp/gateway_watchdog_stats \
-          /tmp/gateway_watchdog.history \
+    logger -t "$LOG_TAG" "Stopping service"
+    rm -f /tmp/gateway_watchdog.lock \
           /tmp/gateway_watchdog.history.lock \
-          /tmp/gateway_watchdog.lock \
-          2>/dev/null
+          /tmp/gateway_watchdog_adaptive.lock
 }
 
 service_triggers() {
-    logger -t "$LOG_TAG" "Reloading service"
+    # When the gateway_watchdog UCI config changes, procd will automatically
+    # call reload_service. We intentionally do NOT define a custom reload_service
+    # here — procd's default behaviour (restart the instance) is correct, and a
+    # custom implementation that calls config_load would re-fire this trigger,
+    # causing a double-start loop visible in the logs.
     procd_add_reload_trigger "gateway_watchdog"
 }
