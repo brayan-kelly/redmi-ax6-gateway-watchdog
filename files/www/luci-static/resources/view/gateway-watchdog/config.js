@@ -73,14 +73,13 @@ return view.extend({
         o.rmempty = false;
         o.default = 'full';
         o.value('none', 'None');
-        o.value('ping-retry', 'Ping Retry');
         o.value('standard', 'Standard (ifdown/ifup)');
-        o.value('route-flush', 'Route Flush');
         o.value('dhcp-renew', 'DHCP Renew');
-        o.value('full', 'Full (ifdown + route flush + ifup)');
+        o.value('lan-reset', 'LAN Reset (fix bridge/NAT issues)');
+        o.value('full', 'Full (ifdown + dhcp-renew + lan-reset');
         o.value('reboot', 'Reboot');
 
-        o = s.option(form.Value, 'recovery_verify_targets', _('Diagnostic Targets'));
+        o = s.option(form.Value, 'recovery_verify_targets', _('Recovery Diagnostic Targets'));
         o.rmempty = false;
         o.default = '8.8.8.8,1.1.1.1';
         o.description = _('Comma-separated list of IPs to ping for connectivity verification.');
